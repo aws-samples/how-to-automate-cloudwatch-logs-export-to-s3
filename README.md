@@ -8,7 +8,7 @@ The solution address common challenges such as long-term retention for complianc
 ![image](https://github.com/user-attachments/assets/93a03949-a270-4616-9d94-6a8a999cb6d8)
 
 
-Features:
+# Features:
 - Automated export of CloudWatch Logs to S3
 - S3 Object Lock for compliance and data retention
 - KMS encryption for data at rest
@@ -24,7 +24,7 @@ Prerequisites
 - Valid email address for alerts
 - If deploying in VPC: Valid VPC ID, Subnet IDs, and Security Group ID
 
-Parameters:
+# Parameters:
 
 Required Parameters:
 - AlertEmail: Email address for receiving alerts
@@ -39,7 +39,7 @@ Optional Parameters
 - SubnetIds: Comma-separated list of Subnet IDs
 - SecurityGroupId: Security Group ID for Lambda
 
-Environment-Specific Configurations:
+# Environment-Specific Configurations:
 
 Development:
 - Log Retention: 60 days
@@ -71,7 +71,7 @@ Resource Components:
 5.	S3 bucket policies
 6.	KMS key policies
 
-Deployment Instructions:
+# Deployment Instructions:
 
 1.	Prepare Parameters:
 - Identify CloudWatch Log Groups to export
@@ -92,7 +92,7 @@ aws cloudformation create-stack \
 - Check Lambda function deployment
 - Validate IAM roles and policies
 
-Maintenance and Operations:
+# Maintenance and Operations:
 
 Monitoring:
 - CloudWatch Logs for Lambda function
