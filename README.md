@@ -5,6 +5,7 @@ Overview
 This solution provides automated export of CloudWatch Logs to an S3 bucket with enhanced security features including Object Lock retention and KMS encryption. It uses AWS CloudFormation to deploy the required infrastructure and a Lambda function to manage the exprt process.
 
 The solution address common challenges such as long-term retention for compliance, cost-effective storage of historical data, secure handling of sensitive information, scalability across multiple log groups, and ease of access for analysis. By automating daily exports, it reduces operational overhead while ensuring systematic archiving in S3 with maintained data integrity and security.
+
 ![image](https://github.com/user-attachments/assets/93a03949-a270-4616-9d94-6a8a999cb6d8)
 
 
