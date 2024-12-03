@@ -1,0 +1,545 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudWatch Logs to S3 Export Automation with Lambda and Object Lock'
+
+Parameters:
+  Name:
+    Type: String
+    Description: Name prefix for resources
+    Default: cwlogs-export
+
+  Environment:
+    Type: String
+    Description: Environment name
+    Default: production
+    AllowedValues:
+      - development
+      - staging-qa
+      - production
+
+  AlertEmail:
+    Type: String
+    Description: Email address for alerts
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+  CloudWatchLogGroups:
+    Type: CommaDelimitedList
+    Description: List of CloudWatch Log Groups to export (comma-separated)
+    Default: /aws/lambda/test-function1,/aws-glue/jobs/error,/u0#/oracle/diag/rdbms/*/*/trace/*.log
+
+  ObjectLockMode:
+    Type: String
+    Description: S3 Object Lock retention mode
+    Default: COMPLIANCE
+    AllowedValues:
+      - GOVERNANCE
+      - COMPLIANCE
+
+  ObjectLockRetentionDays:
+    Type: Number
+    Description: Number of days for Object Lock retention
+    Default: 365
+    MinValue: 1
+    MaxValue: 3650
+
+  DeployInVPC:
+    Type: String
+    Description: Deploy Lambda function in VPC
+    Default: false
+    AllowedValues: [true, false]
+
+  VpcId:
+    Type: String
+    Description: VPC ID for Lambda function (required if DeployInVPC is true)
+    Default: ""
+    AllowedPattern: ^(vpc-[a-f0-9]{8,17}|)$
+    ConstraintDescription: Must be a valid VPC ID or empty string
+  
+  SubnetIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: Subnet IDs for Lambda function (minimum 2 recommended) - (required if DeployInVPC is true)
+    AllowedPattern: ^$|^subnet-[a-f0-9]{8,17}(,subnet-[a-f0-9]{8,17})*$
+    ConstraintDescription: Must be comma-separated list of valid subnet IDs or empty string
+  
+  SecurityGroupId:
+    Type: String
+    Default: ""
+    Description: Security Group ID for Lambda function (required if DeployInVPC is true)
+    AllowedPattern: ^$|^sg-[a-f0-9]{8,17}$
+    ConstraintDescription: Must be a valid security group ID or empty string
+
+Mappings:
+  EnvironmentMap:
+    development:
+      LogRetention: 60
+    staging-qa:
+      LogRetention: 90
+    production:
+      LogRetention: 365
+
+Conditions:
+  DeployWithVPC: !Equals 
+    - !Ref DeployInVPC
+    - 'true'
+  HasValidVPCConfig: !And
+    - !Condition DeployWithVPC
+    - !Not [!Equals [!Ref VpcId, ""]]
+    - !Not [!Equals [!Select [0, !Ref SubnetIds], ""]]
+    - !Not [!Equals [!Ref SecurityGroupId, ""]]
+
+Resources:
+  CloudWatchLogsS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${AWS::AccountId}-${Name}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: !Ref ObjectLockMode
+            Days: !Ref ObjectLockRetentionDays
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt CloudWatchLogsKMSKey.Arn
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpirationRule
+            Status: Enabled
+            ExpirationInDays: !FindInMap [EnvironmentMap, !Ref Environment, LogRetention]
+      Tags:
+        - Key: Name
+          Value: !Sub "${Name}-s3-bucket"
+        - Key: Environment
+          Value: !Ref Environment
+
+  CloudWatchLogsS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudWatchLogsS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudWatchLogsExportGetAcl
+            Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action: 's3:GetBucketAcl'
+            Resource: !GetAtt CloudWatchLogsS3Bucket.Arn
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+              ArnLike:
+                "aws:SourceArn": !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+          - Sid: AllowCloudWatchLogsExportPutObject
+            Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub "${CloudWatchLogsS3Bucket.Arn}/*"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+                "s3:x-amz-acl": "bucket-owner-full-control"
+              ArnLike:
+                "aws:SourceArn": !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+  CloudWatchLogsKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for CloudWatch Logs export encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMUserPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub "${Name}-kms-key"
+        - Key: Environment
+          Value: !Ref Environment
+
+  CloudWatchLogsKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${Name}"
+      TargetKeyId: !Ref CloudWatchLogsKMSKey
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Name}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CloudWatchLogsExportPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateExportTask'
+                  - 'logs:DescribeExportTasks'
+                  - 'logs:CancelExportTask'
+                  - 'logs:DescribeLogGroups'
+                  - 'logs:DescribeLogStreams'
+                Resource: 
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                Resource:
+                  - !GetAtt CloudWatchLogsS3Bucket.Arn
+                  - !Sub '${CloudWatchLogsS3Bucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                Resource: !GetAtt CloudWatchLogsKMSKey.Arn
+        - !If
+          - DeployWithVPC
+          - PolicyName: VPCAccessPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - 'ec2:CreateNetworkInterface'
+                    - 'ec2:DescribeNetworkInterfaces'
+                    - 'ec2:DeleteNetworkInterface'
+                    - 'ec2:AssignPrivateIpAddresses'
+                    - 'ec2:UnassignPrivateIpAddresses'
+                  Resource: '*'
+          - !Ref AWS::NoValue
+
+  CloudWatchLogsExportFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Name}-function"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      MemorySize: 256
+      Environment:
+        Variables:
+          DESTINATION_BUCKET: !Ref CloudWatchLogsS3Bucket
+          LOG_GROUPS: !Join [",", !Ref CloudWatchLogGroups]
+          OBJECT_LOCK_MODE: !Ref ObjectLockMode
+          OBJECT_LOCK_RETENTION_DAYS: !Ref ObjectLockRetentionDays
+      VpcConfig: !If 
+        - HasValidVPCConfig
+        - SubnetIds: !Ref SubnetIds
+          SecurityGroupIds: 
+            - !Ref SecurityGroupId
+        - !Ref AWS::NoValue
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import time
+          from datetime import datetime, timedelta
+          from typing import Dict, Any, List
+          from botocore.exceptions import ClientError
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          class LogExportError(Exception):
+              """Custom exception for log export errors"""
+              pass
+
+          def get_environment_variables() -> Dict[str, str]:
+              required_vars = ['DESTINATION_BUCKET', 'LOG_GROUPS']
+              env_vars = {}
+              
+              for var in required_vars:
+                  value = os.environ.get(var)
+                  if not value:
+                      raise ValueError(f"Missing required environment variable: {var}")
+                  env_vars[var] = value
+              
+              return env_vars
+
+          def get_time_range() -> tuple[int, int, datetime]:
+              today = datetime.utcnow().date()
+              yesterday = today - timedelta(days=1)
+              
+              start_time = int(datetime(yesterday.year, yesterday.month, yesterday.day).timestamp() * 1000)
+              end_time = int(datetime(today.year, today.month, today.day).timestamp() * 1000)
+              
+              return start_time, end_time, yesterday
+
+          def wait_for_export_task(client: boto3.client, task_id: str, max_wait_time: int = 3600) -> Dict[str, Any]:
+              start_time = time.time()
+              
+              while (time.time() - start_time) < max_wait_time:
+                  try:
+                      response = client.describe_export_tasks(taskId=task_id)
+                      task = response['exportTasks'][0]
+                      status = task['status']['code']
+                      
+                      logger.info(f"Export task {task_id} status: {status}")
+                      
+                      if status == 'COMPLETED':
+                          return task
+                      elif status == 'FAILED':
+                          error_message = task['status'].get('error', {}).get('message', 'Unknown error')
+                          raise LogExportError(f"Export task {task_id} failed: {error_message}")
+                      elif status == 'CANCELLED':
+                          raise LogExportError(f"Export task {task_id} was cancelled")
+                      
+                      time.sleep(30)
+                      
+                  except ClientError as e:
+                      raise LogExportError(f"Failed to check export task status: {str(e)}")
+              
+              raise LogExportError(f"Export task {task_id} timed out after {max_wait_time} seconds")
+
+          def export_log_group(
+              client: boto3.client,
+              log_group: str,
+              destination_bucket: str,
+              start_time: int,
+              end_time: int,
+              date: datetime.date
+          ) -> Dict[str, Any]:
+              try:
+                  # Format: YYYY-MM-DD/aws-loggroup-name
+                  log_name = log_group.lstrip('/').replace('/', '-')
+                  prefix = f"{date.strftime('%Y-%m-%d')}/{log_name}"
+                  
+                  logger.info(f"Starting export for log group: {log_group}")
+                  logger.info(f"Destination: s3://{destination_bucket}/{prefix}")
+                  
+                  try:
+                      response = client.create_export_task(
+                          logGroupName=log_group,
+                          fromTime=start_time,
+                          to=end_time,
+                          destination=destination_bucket,
+                          destinationPrefix=prefix
+                      )
+                      
+                      task_id = response['taskId']
+                      logger.info(f"Created export task {task_id} for {log_group}")
+                      
+                      return wait_for_export_task(client, task_id)
+                      
+                  except ClientError as e:
+                      error_code = e.response['Error']['Code']
+                      if error_code == 'LimitExceededException':
+                          raise LogExportError("Another export task is already running. Please wait for it to complete.")
+                      elif error_code == 'ResourceNotFoundException':
+                          raise LogExportError(f"Log group {log_group} not found")
+                      elif error_code == 'InvalidParameterException':
+                          raise LogExportError(f"Invalid parameters for log group {log_group}: {str(e)}")
+                      raise LogExportError(f"Failed to export {log_group}: {str(e)}")
+                      
+              except Exception as e:
+                  raise LogExportError(f"Unexpected error exporting {log_group}: {str(e)}")
+
+          def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+              try:
+                  env_vars = get_environment_variables()
+                  destination_bucket = env_vars['DESTINATION_BUCKET']
+                  log_groups = [lg.strip() for lg in env_vars['LOG_GROUPS'].split(',') if lg.strip()]
+                  
+                  if not log_groups:
+                      raise ValueError("No valid log groups specified")
+
+                  start_time, end_time, yesterday = get_time_range()
+                  client = boto3.client('logs')
+                  
+                  results = {
+                      'successful_exports': [],
+                      'failed_exports': [],
+                      'timestamp': datetime.utcnow().isoformat()
+                  }
+
+                  for log_group in log_groups:
+                      try:
+                          logger.info(f"Processing log group: {log_group}")
+                          
+                          result = export_log_group(
+                              client=client,
+                              log_group=log_group,
+                              destination_bucket=destination_bucket,
+                              start_time=start_time,
+                              end_time=end_time,
+                              date=yesterday
+                          )
+                          
+                          results['successful_exports'].append({
+                              'logGroup': log_group,
+                              'taskId': result['taskId'],
+                              'status': 'COMPLETED',
+                              'timestamp': datetime.utcnow().isoformat()
+                          })
+                          
+                      except LogExportError as e:
+                          logger.error(f"Failed to export {log_group}: {str(e)}")
+                          results['failed_exports'].append({
+                              'logGroup': log_group,
+                              'error': str(e),
+                              'timestamp': datetime.utcnow().isoformat()
+                          })
+                          continue
+
+                  results.update({
+                      'total_processed': len(log_groups),
+                      'success_count': len(results['successful_exports']),
+                      'failure_count': len(results['failed_exports'])
+                  })
+
+                  if results['failed_exports']:
+                      logger.warning(
+                          f"Completed with {len(results['failed_exports'])} failures "
+                          f"out of {len(log_groups)} log groups"
+                      )
+                  else:
+                      logger.info(f"Successfully processed all {len(log_groups)} log groups")
+
+                  return results
+
+              except Exception as e:
+                  error_message = f"Critical error occurred: {str(e)}"
+                  logger.error(error_message)
+                  raise Exception(error_message)
+
+  CloudWatchLogsExportScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Name}-scheduled-rule"
+      Description: "ScheduledRule for CloudWatch Logs Export"
+      ScheduleExpression: "cron(0 1 * * ? *)"
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt CloudWatchLogsExportFunction.Arn
+          Id: "TargetFunctionV1"
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600
+            MaximumRetryAttempts: 2
+
+  CloudWatchLogsExportPermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CloudWatchLogsExportFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt CloudWatchLogsExportScheduledRule.Arn
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${Name}-alerts"
+      KmsMasterKeyId: !GetAtt CloudWatchLogsKMSKey.Arn
+
+  AlertTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Alert on ${Name} Lambda function errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CloudWatchLogsExportFunction
+
+Outputs:
+  S3BucketName:
+    Description: Name of the S3 bucket storing exported logs
+    Value: !Ref CloudWatchLogsS3Bucket
+
+  S3BucketArn:
+    Description: ARN of the S3 bucket storing exported logs
+    Value: !GetAtt CloudWatchLogsS3Bucket.Arn
+
+  KMSKeyArn:
+    Description: ARN of the KMS key
+    Value: !GetAtt CloudWatchLogsKMSKey.Arn
+
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref CloudWatchLogsExportFunction
+
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt CloudWatchLogsExportFunction.Arn
+
+  AlertTopicArn:
+    Description: ARN of the SNS alert topic
+    Value: !Ref AlertTopic
+
+  VPCDeploymentStatus:
+    Description: VPC deployment status
+    Value: !If [HasValidVPCConfig, "Successfully deployed in VPC", "Not deployed in VPC"]
+
+  VPCId:
+    Description: VPC ID used for Lambda deployment
+    Value: !If [HasValidVPCConfig, !Ref VpcId, "N/A"]
+    Condition: DeployWithVPC
+
+  SubnetIds:
+    Description: Subnet IDs used for Lambda deployment
+    Value: !If [HasValidVPCConfig, !Join [",", !Ref SubnetIds], "N/A"]
+    Condition: DeployWithVPC
+
+  SecurityGroupId:
+    Description: Security Group ID used for Lambda deployment
+    Value: !If [HasValidVPCConfig, !Ref SecurityGroupId, "N/A"]
+    Condition: DeployWithVPC
+
+  ObjectLockConfiguration:
+    Description: "Object Lock configuration"
+    Value: !Sub "Mode: ${ObjectLockMode}, Retention: ${ObjectLockRetentionDays} days"
