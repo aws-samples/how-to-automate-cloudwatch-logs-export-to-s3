@@ -488,9 +488,6 @@ Resources:
               "timeOffset": ${ExportTimeOffset},
               "retryAttempts": ${RetryAttempts}
             }
-         # RetryPolicy:
-         #   MaximumEventAgeInSeconds: 3600
-         #   MaximumRetryAttempts: 2
 
   CloudWatchLogsExportPermissionForEventsToInvokeLambda:
     Type: AWS::Lambda::Permission
