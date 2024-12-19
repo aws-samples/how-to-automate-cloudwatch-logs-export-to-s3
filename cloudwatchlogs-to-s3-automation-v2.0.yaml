@@ -47,6 +47,35 @@ Parameters:
     Default: false
     AllowedValues: [true, false]
 
+  ExportSchedule:
+    Type: String
+    Default: 'cron(0 0 * * ? *)'
+    Description: >-
+      Schedule expression for log export (default: daily at midnight).
+      Use cron(Minutes Hours Day-of-month Month Day-of-week Year) or 
+      rate(Value Unit) expression. Examples:
+      - cron(0 0 * * ? *) = Daily at midnight UTC
+      - cron(0 12 ? * MON-FRI *) = Weekdays at noon UTC
+      - rate(24 hours) = Every 24 hours
+    AllowedPattern: '^(cron\([^\)]*\)|rate\([^\)]*\))$'
+    ConstraintDescription: Must be a valid cron() or rate() expression
+
+  ExportTimeOffset:
+    Type: Number
+    Default: 24
+    Description: >-
+      Time offset in hours to subtract from current time when exporting logs.
+      This creates a buffer to ensure all logs are captured.
+    MinValue: 1
+    MaxValue: 168
+
+  RetryAttempts:
+    Type: Number
+    Default: 3
+    Description: Number of retry attempts for failed exports
+    MinValue: 0
+    MaxValue: 5
+
   VpcId:
     Type: String
     Description: VPC ID for Lambda function (required if DeployInVPC is true)
@@ -449,14 +478,19 @@ Resources:
     Properties:
       Name: !Sub "${Name}-scheduled-rule"
       Description: "ScheduledRule for CloudWatch Logs Export"
-      ScheduleExpression: "cron(0 1 * * ? *)"
+      ScheduleExpression: !Ref ExportSchedule
       State: "ENABLED"
       Targets:
         - Arn: !GetAtt CloudWatchLogsExportFunction.Arn
           Id: "TargetFunctionV1"
-          RetryPolicy:
-            MaximumEventAgeInSeconds: 3600
-            MaximumRetryAttempts: 2
+          Input: !Sub |
+            {
+              "timeOffset": ${ExportTimeOffset},
+              "retryAttempts": ${RetryAttempts}
+            }
+         # RetryPolicy:
+         #   MaximumEventAgeInSeconds: 3600
+         #   MaximumRetryAttempts: 2
 
   CloudWatchLogsExportPermissionForEventsToInvokeLambda:
     Type: AWS::Lambda::Permission
